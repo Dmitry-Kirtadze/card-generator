@@ -72,7 +72,10 @@ def restart(app_dir: Path) -> None:
     window = QApplication.activeWindow()
     if window is not None and not window.close():
         return
-    QProcess.startDetached(sys.executable, [str(app_dir / "main.py")], str(app_dir))
+    if getattr(sys, "frozen", False):  # CardGen.exe сам вибере оновлений код
+        QProcess.startDetached(sys.executable, [], str(Path(sys.executable).parent))
+    else:
+        QProcess.startDetached(sys.executable, [str(app_dir / "main.py")], str(app_dir))
     QApplication.quit()
 
 

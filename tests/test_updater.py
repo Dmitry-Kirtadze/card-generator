@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from cardgen.ui.update_ui import UpdateDialog, changes_text
-from cardgen.updater import UpdateError, UpdateInfo, Updater, _run
+from cardgen.updater import UpdateError, UpdateInfo, Updater, _run, read_runtime
 
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="немає git")
 
@@ -113,6 +113,70 @@ def test_server_unreachable(repos, tmp_path):
     git(app, "remote", "set-url", "origin", str(tmp_path / "немає.git"))
     with pytest.raises(UpdateError):
         Updater(app).check()
+
+
+# --- Зібрана програма: перше встановлення й версія бібліотек ------------------------
+
+def set_runtime(dev: Path, runtime: int) -> None:
+    (dev / "cardgen").mkdir(exist_ok=True)
+    commit(dev, "cardgen/__init__.py", f'__version__ = "x"\nRUNTIME = {runtime}\n', f"Бібліотеки {runtime}")
+    git(dev, "push", "-q", "origin", "main")
+
+
+def test_first_install_clones(repos, tmp_path):
+    server, _, dev = repos
+    set_runtime(dev, 1)
+    target = tmp_path / "user" / "app"
+    updater = Updater(target, python=None, repo_url=str(server), runtime=1)
+    assert updater.supported() == (True, "")
+    info = updater.check()
+    assert info.available and info.branch == "main"
+    updater.apply()
+    assert (target / ".git").exists() and read_runtime(target) == 1
+    assert not updater.check().available
+
+
+def test_newer_runtime_needs_new_build(repos, tmp_path):
+    server, _, dev = repos
+    target = tmp_path / "app"
+    updater = Updater(target, python=None, repo_url=str(server), runtime=1)
+    updater.apply()
+    set_runtime(dev, 2)
+    with pytest.raises(UpdateError, match="нову збірку"):
+        updater.apply()
+
+
+def test_frozen_does_not_run_pip(repos, tmp_path):
+    server, _, dev = repos
+    target = tmp_path / "app"
+    calls = []
+
+    def runner(cmd, cwd, timeout):
+        calls.append(cmd[0])
+        return _run(cmd, cwd, timeout)
+
+    updater = Updater(target, runner=runner, python=None, repo_url=str(server))
+    updater.apply()
+    commit(dev, "requirements.txt", "PySide6\nopenpyxl\n", "Нова бібліотека")
+    git(dev, "push", "-q", "origin", "main")
+    updater.apply()
+    assert set(calls) == {"git"}
+
+
+def test_launcher_picks_code(tmp_path, monkeypatch):
+    import launcher
+    bundled = tmp_path / "bundle" / "app"
+    updated = tmp_path / "local" / "CardGen" / "app"
+    for code, runtime in ((bundled, 2), (updated, 2)):
+        (code / "cardgen").mkdir(parents=True)
+        (code / "cardgen" / "__init__.py").write_text(f"RUNTIME = {runtime}\n", encoding="utf-8")
+    monkeypatch.setattr(launcher, "bundled_code", lambda: bundled)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+    assert launcher.candidates() == [bundled]  # ще не копія git
+    (updated / ".git").mkdir()
+    assert launcher.candidates() == [updated, bundled]
+    (updated / "cardgen" / "__init__.py").write_text("RUNTIME = 3\n", encoding="utf-8")
+    assert launcher.candidates() == [bundled]  # потрібні новіші бібліотеки
 
 
 # --- Вікно оновлення -----------------------------------------------------------------

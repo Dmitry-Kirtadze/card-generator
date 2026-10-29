@@ -12,8 +12,7 @@ from .category_page import CategoryPage
 from .data_page import DataPage
 from .preview_page import PreviewPage
 from .update_ui import StartupUpdater, UpdateDialog
-from ..config import app_dir
-from ..updater import Updater
+from ..updater import app_updater
 from .editor.page import EditorPage
 from .fonts import register_library_fonts
 from .library_dialog import LibraryDialog
@@ -53,7 +52,7 @@ class MainWindow(QMainWindow):
         self.categories_page.open_category.connect(self.show_category)
         self.categories_page.open_library.connect(self.show_library)
         self.categories_page.open_updates.connect(self.show_updates)
-        self.updater = Updater(app_dir())
+        self.updater = app_updater()
         self.category_page.back.connect(self.show_categories)
         self.category_page.edit_template.connect(self.open_editor)
         self.category_page.open_data.connect(self.open_data)
