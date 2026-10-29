@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import os
 import shutil
 import subprocess
@@ -115,11 +116,15 @@ def install(built: Path) -> Path:
     script = (
         "$s = New-Object -ComObject WScript.Shell;"
         "foreach ($dir in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) {"
-        f"  $l = $s.CreateShortcut((Join-Path $dir '{TITLE}.lnk'));"
+        # WScript.Shell не зберігає файл з кирилицею в назві — зберігаємо латиницею й перейменовуємо
+        f"  $tmp = Join-Path $dir '{NAME}.lnk'; $final = Join-Path $dir '{TITLE}.lnk';"
+        "  $l = $s.CreateShortcut($tmp);"
         f"  $l.TargetPath = '{exe}'; $l.WorkingDirectory = '{target}'; $l.IconLocation = '{exe},0';"
-        "  $l.Description = 'Генератор карток товарів'; $l.Save() }"
+        "  $l.Save(); Move-Item -Force -LiteralPath $tmp -Destination $final }"
     )
-    subprocess.run(["powershell", "-NoProfile", "-Command", script], check=True)
+    # -EncodedCommand (UTF-16), щоб кирилиця в команді дійшла без змін
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    subprocess.run(["powershell", "-NoProfile", "-EncodedCommand", encoded], check=True)
     return exe
 
 
