@@ -1,46 +1,99 @@
 """Завантаження растрових і SVG-зображень з кешем."""
 from __future__ import annotations
 
+from collections import OrderedDict
 from pathlib import Path
 
-from PySide6.QtCore import QRectF, QSizeF, Qt
-from PySide6.QtGui import QColor, QImage, QPainter
+from PySide6.QtCore import QRectF, QSize, QSizeF, Qt
+from PySide6.QtGui import QColor, QImage, QImageReader, QPainter
 from PySide6.QtSvg import QSvgRenderer
 
 from .background import remove_white_background
 
 
+# Декодовані растри й фото без білого фону — спільні для всіх ImageCache (кожна картка
+# товару має свій RenderContext), з обмеженням пам'яті. Ключ містить час зміни файлу.
+_RASTER: OrderedDict[tuple, QImage | None] = OrderedDict()
+_NO_WHITE: OrderedDict[tuple, QImage | None] = OrderedDict()
+_SIZES: dict[tuple, QSize | None] = {}
+CACHE_BYTES = 256 * 1024 * 1024  # на кожен із двох кешів
+MIN_BUCKET = 256
+
+
+def processing_side(natural_side: int, drawn_side: float | None) -> int:
+    """Розмір, у якому декодувати/обробляти зображення: з запасом під розмір на екрані,
+    не більше оригіналу. Розміри «сходинками» (256, 512, 1024…), щоб невелика зміна
+    масштабу не вимагала нової обробки.
+    """
+    if not drawn_side:
+        return natural_side
+    side = MIN_BUCKET
+    while side < drawn_side * 1.5 and side < natural_side:
+        side *= 2
+    return min(side, natural_side)
+
+
+def load_scaled(path: Path, side: int | None = None) -> QImage | None:
+    """Декодує файл, одразу зменшуючи до side (JPEG при цьому декодується в рази швидше)."""
+    reader = QImageReader(str(path))
+    size = reader.size()
+    if side and size.isValid() and max(size.width(), size.height()) > side:
+        reader.setScaledSize(size.scaled(side, side, Qt.AspectRatioMode.KeepAspectRatio))
+    image = reader.read()
+    return None if image.isNull() else image
+
+
+def _remember(cache: OrderedDict, key: tuple, image: QImage | None) -> None:
+    cache[key] = image
+    total = sum(i.sizeInBytes() for i in cache.values() if i is not None)
+    while total > CACHE_BYTES and len(cache) > 1:
+        _, old = cache.popitem(last=False)
+        total -= old.sizeInBytes() if old is not None else 0
+
+
+def _cached(cache: OrderedDict, key: tuple):
+    if key in cache:
+        cache.move_to_end(key)
+        return True, cache[key]
+    return False, None
+
+
 class ImageCache:
-    """Кеш за шляхом; файл перечитується, якщо змінився час модифікації."""
+    """Доступ до зображень з кешем; файл перечитується, якщо змінився час модифікації."""
 
     def __init__(self) -> None:
-        self._raster: dict[Path, tuple[float, QImage | None]] = {}
         self._svg: dict[Path, tuple[float, QSvgRenderer | None]] = {}
-        self._no_white: dict[tuple[Path, int], tuple[float, QImage | None]] = {}
 
-    def without_white(self, path: Path, tolerance: int) -> QImage | None:
-        """Растрове фото з прозорим білим фоном (обчислюється один раз на файл)."""
-        image = self.raster(path)
-        if image is None:
-            return None
-        mtime = _mtime(path)
-        key = (path, tolerance)
-        cached = self._no_white.get(key)
-        if cached is None or cached[0] != mtime:
-            cached = (mtime, remove_white_background(image, tolerance))
-            self._no_white[key] = cached
-        return cached[1]
+    def without_white(self, path: Path, tolerance: int, drawn_side: float | None = None) -> QImage | None:
+        """Растрове фото з прозорим білим фоном.
 
-    def raster(self, path: Path) -> QImage | None:
-        mtime = _mtime(path)
-        if mtime is None:
+        drawn_side — більша сторона фото на екрані/картці в пікселях: дрібне (мініатюри, стрічка
+        перегляду) обробляється у зменшеному вигляді — це в десятки разів швидше.
+        """
+        natural = self.natural_size(path)
+        if natural is None:
             return None
-        cached = self._raster.get(path)
-        if cached is None or cached[0] != mtime:
-            image = QImage(str(path))
-            cached = (mtime, None if image.isNull() else image)
-            self._raster[path] = cached
-        return cached[1]
+        side = processing_side(round(max(natural.width(), natural.height())), drawn_side)
+        key = (path, _mtime(path), tolerance, side)
+        found, image = _cached(_NO_WHITE, key)
+        if not found:
+            source = self.raster(path, drawn_side)
+            image = remove_white_background(source, tolerance) if source is not None else None
+            _remember(_NO_WHITE, key, image)
+        return image
+
+    def raster(self, path: Path, drawn_side: float | None = None) -> QImage | None:
+        """Растр; з drawn_side — зменшений під розмір на екрані (див. processing_side)."""
+        natural = self.natural_size(path)
+        if natural is None:
+            return None
+        side = processing_side(round(max(natural.width(), natural.height())), drawn_side)
+        key = (path, _mtime(path), side)
+        found, image = _cached(_RASTER, key)
+        if not found:
+            image = load_scaled(path, side)
+            _remember(_RASTER, key, image)
+        return image
 
     def svg(self, path: Path) -> QSvgRenderer | None:
         mtime = _mtime(path)
@@ -57,8 +110,15 @@ class ImageCache:
         if path.suffix.lower() == ".svg":
             renderer = self.svg(path)
             return QSizeF(renderer.defaultSize()) if renderer else None
-        image = self.raster(path)
-        return QSizeF(image.size()) if image else None
+        mtime = _mtime(path)
+        if mtime is None:
+            return None
+        key = (path, mtime)
+        if key not in _SIZES:  # лише заголовок файлу, без декодування
+            size = QImageReader(str(path)).size()
+            _SIZES[key] = size if size.isValid() and not size.isEmpty() else None
+        size = _SIZES[key]
+        return QSizeF(size) if size is not None else None
 
 
 def _mtime(path: Path) -> float | None:
@@ -88,7 +148,9 @@ def draw_file(painter: QPainter, cache: ImageCache, path: Path, target: QRectF,
         if renderer is None:
             return False
     else:
-        image = cache.raster(path)
+        t = painter.worldTransform()
+        device = (t.m11() ** 2 + t.m12() ** 2) ** 0.5  # пікселів пристрою на одиницю картки
+        image = cache.raster(path, max(target.width(), target.height()) * device)
         if image is None:
             return False
 

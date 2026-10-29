@@ -2,14 +2,14 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QIcon, QKeySequence, QPixmap
+from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QListWidgetItem, QVBoxLayout, QWidget
 
 from ..storage import StorageError, Workspace
 from ..transfer import EXTENSION, export_category, import_category
 from . import dialogs
 from .common import THUMB_SIZE, ActionSet, make_grid_list, plural
-from .thumbnails import render_thumbnail
+from .thumbnails import ThumbnailLoader
 
 ARCHIVE_FILTER = f"Категорія (*{EXTENSION} *.zip)"
 
@@ -27,6 +27,7 @@ class CategoriesPage(QWidget):
         title.setObjectName("pageTitle")
 
         self.grid = make_grid_list(self)
+        self.thumbs = ThumbnailLoader(self.grid, workspace, THUMB_SIZE)
         self.grid.setObjectName("categoriesGrid")
         self.grid.itemActivated.connect(lambda item: self.open_category.emit(item.data(Qt.ItemDataRole.UserRole)))
         self.grid.itemSelectionChanged.connect(self._update_buttons)
@@ -63,23 +64,20 @@ class CategoriesPage(QWidget):
     def refresh(self, select_id: str | None = None) -> None:
         select_id = select_id or self.selected_id()
         self.grid.blockSignals(True)  # під час перебудови виділення вказує на старі елементи
+        self.thumbs.reset()
         self.grid.clear()
         for category in self.workspace.list_categories():
             try:
                 templates = self.workspace.list_templates(category.id)
             except StorageError:
                 templates = []
-            if templates:
-                icon = render_thumbnail(templates[0], THUMB_SIZE, self.workspace, category.id)
-            else:
-                icon = QPixmap(THUMB_SIZE, THUMB_SIZE)
-                icon.fill(QColor("#E9ECF2"))
+            icon = self.thumbs.icon_for(category.id, templates[0] if templates else None, category.id)
             count = plural(len(templates), 'шаблон', 'шаблони', 'шаблонів')
             if category.protected:
                 text = f"{category.name} · готові\n{count}"
             else:
                 text = f"{category.name}\n{count}"
-            item = QListWidgetItem(QIcon(icon), text)
+            item = QListWidgetItem(icon, text)
             item.setData(Qt.ItemDataRole.UserRole, category.id)
             item.setData(Qt.ItemDataRole.UserRole + 1, category.protected)
             if category.protected:

@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QIcon, QImage, QPixmap
+from PySide6.QtGui import QBrush, QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -27,6 +27,7 @@ from ..data.fields import KEY_COLUMN, TYPE_TITLES, Schema, build_schema
 from ..data.photos import PhotoError, cleanup_unused, store_image
 from ..data.table_io import TableImportError, export_xlsx, import_table
 from ..data.validate import Issue, validate
+from ..render.images import load_scaled
 from ..storage import StorageError, Workspace
 from . import dialogs
 
@@ -102,6 +103,22 @@ class DataTable(QTableWidget):
             event.acceptProposedAction()
             return
         super().dropEvent(event)
+
+
+_ICONS: dict[tuple[Path, int], QIcon | None] = {}
+
+
+def photo_icon(path: Path) -> QIcon | None:
+    """Іконка фото для таблиці; кешується, доки файл не змінився."""
+    try:
+        key = (path, path.stat().st_mtime_ns)
+    except OSError:
+        return None
+    if key not in _ICONS:
+        image = load_scaled(path, THUMB * 2)  # декодувати одразу маленьким
+        _ICONS[key] = None if image is None else QIcon(QPixmap.fromImage(image.scaled(
+            THUMB, THUMB, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)))
+    return _ICONS[key]
 
 
 class DataPage(QWidget):
@@ -238,11 +255,9 @@ class DataPage(QWidget):
         item = QTableWidgetItem(value)
         spec = self.schema.get(column)
         if spec is not None and spec.is_image and value:
-            image = QImage(str(self.images() / value))
-            if not image.isNull():
-                item.setIcon(QIcon(QPixmap.fromImage(image.scaled(
-                    THUMB, THUMB, Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation))))
+            icon = photo_icon(self.images() / value)
+            if icon is not None:
+                item.setIcon(icon)
         if spec is None:
             item.setForeground(EXTRA_FG)
         return item

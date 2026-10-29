@@ -5,7 +5,8 @@
 
 Пошук з'єднаної області — морфологічна реконструкція (розширення маски
 в межах «білих» пікселів, поки вона росте). Щоб це було швидко, основна
-робота йде на зменшеній копії, а край уточнюється на повному розмірі.
+робота йде на зменшеній копії (а там — від ще меншої до більшої, _connected),
+а край уточнюється на повному розмірі.
 """
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ from PySide6.QtGui import QImage
 
 WORK_SIDE = 320  # розмір зменшеної копії для пошуку фону
 EDGE_PASSES = 4  # уточнення краю на повному розмірі
+COARSE_SIDE = 80  # найменший рівень пошуку в _connected
 
 
 def qimage_to_pil(image: QImage) -> Image.Image:
@@ -56,6 +58,27 @@ def _border_seed(mask: Image.Image) -> Image.Image:
     return border
 
 
+def _shrink(mask: Image.Image, scale: float) -> Image.Image:
+    """Зменшена маска: клітинка «біла», лише якщо біла повністю — тонкі контури товару не губляться."""
+    w, h = mask.size
+    size = (max(1, round(w / scale)), max(1, round(h / scale)))
+    return mask.resize(size, Image.BOX).point(lambda v: 255 if v >= 254 else 0)
+
+
+def _connected(mask: Image.Image) -> Image.Image:
+    """Біла область, з'єднана з краєм (точно).
+
+    Спершу шукаємо на копії до COARSE_SIDE px: знайдене там гарантовано належить фону,
+    тож на поточному рівні лишається дорости від нього кілька кроків, а не через усю картинку.
+    """
+    w, h = mask.size
+    seed = _border_seed(mask)
+    if max(w, h) > COARSE_SIDE:
+        coarse = _connected(_shrink(mask, max(w, h) / COARSE_SIDE))
+        seed = ImageChops.lighter(seed, ImageChops.multiply(coarse.resize((w, h), Image.NEAREST), mask))
+    return _grow(seed, mask)
+
+
 def background_mask(image: Image.Image, tolerance: int) -> Image.Image:
     """Маска фону (255 — фон) повного розміру."""
     rgb = image.convert("RGB")
@@ -63,14 +86,11 @@ def background_mask(image: Image.Image, tolerance: int) -> Image.Image:
     w, h = full.size
     scale = max(w, h) / WORK_SIDE
     if scale > 1:
-        small_size = (max(1, round(w / scale)), max(1, round(h / scale)))
-        # клітинка зменшеної копії «біла», лише якщо біла повністю: тонкі контури товару не губляться
-        small = full.resize(small_size, Image.BOX).point(lambda v: 255 if v >= 254 else 0)
-        found = _grow(_border_seed(small), small)
+        found = _connected(_shrink(full, scale))
         seed = ImageChops.multiply(found.resize((w, h), Image.NEAREST), full)
         seed = ImageChops.lighter(seed, _border_seed(full))
         return _grow(seed, full, limit=round(scale) + EDGE_PASSES)
-    return _grow(_border_seed(full), full)
+    return _connected(full)
 
 
 def remove_white_background(image: QImage, tolerance: int = 20) -> QImage:

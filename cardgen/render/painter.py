@@ -248,7 +248,11 @@ def _paint_photo(painter: QPainter, element: PhotoElement, rect: QRectF, ctx: Re
                     c.y() - h / 2 + element.content_offset_y, w, h)
     painter.save()
     painter.setClipPath(frame, Qt.ClipOperation.IntersectClip)
-    image = ctx.images.without_white(path, element.white_tolerance) if cut_out else None
+    image = None
+    if cut_out:
+        t = painter.worldTransform()
+        device = (t.m11() ** 2 + t.m12() ** 2) ** 0.5  # пікселів пристрою на одиницю картки
+        image = ctx.images.without_white(path, element.white_tolerance, max(w, h) * device)
     if image is not None:
         painter.drawImage(target, image)
     else:

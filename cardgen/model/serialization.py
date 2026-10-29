@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import dataclasses
+import functools
 import typing
 from typing import Any, Callable, TypeVar
 
@@ -73,12 +74,18 @@ def _convert(hint: Any, value: Any) -> Any:
 def _dataclass_from_dict(cls: type[T], data: Any) -> T:
     if not isinstance(data, dict):
         raise SchemaError(f"{cls.__name__}: очікувався об'єкт, отримано {type(data).__name__}")
-    hints = typing.get_type_hints(cls)
     kwargs = {}
-    for f in dataclasses.fields(cls):
-        if f.name in data:
-            kwargs[f.name] = _convert(hints[f.name], data[f.name])
+    for name, hint in _field_hints(cls):
+        if name in data:
+            kwargs[name] = _convert(hint, data[name])
     return cls(**kwargs)
+
+
+@functools.cache
+def _field_hints(cls: type) -> tuple[tuple[str, Any], ...]:
+    """Поля й типи класу. get_type_hints повільний, а викликався б для кожного блоку шаблону."""
+    hints = typing.get_type_hints(cls)
+    return tuple((f.name, hints[f.name]) for f in dataclasses.fields(cls))
 
 
 def _element_from_dict(data: Any) -> Element:

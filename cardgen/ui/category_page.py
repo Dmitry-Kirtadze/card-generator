@@ -5,7 +5,7 @@ import os
 from datetime import datetime
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QIcon, QKeySequence
+from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
@@ -26,7 +26,7 @@ from ..storage import TABLE_EXTENSIONS, StorageError, Workspace
 from . import dialogs, export_dialog
 from .common import THUMB_SIZE, ActionSet, make_grid_list
 from .template_dialog import TemplateValues, ask_template
-from .thumbnails import render_thumbnail
+from .thumbnails import ThumbnailLoader
 
 TABLE_FILTER = "Таблиці (" + " ".join(f"*{ext}" for ext in TABLE_EXTENSIONS) + ")"
 
@@ -54,6 +54,7 @@ class CategoryPage(QWidget):
 
         # --- шаблони
         self.grid = make_grid_list(self)
+        self.thumbs = ThumbnailLoader(self.grid, workspace, THUMB_SIZE)
         self.grid.setObjectName("templatesGrid")
         self.grid.itemActivated.connect(lambda _item: self.edit_selected())
         self.grid.itemSelectionChanged.connect(self._selection_changed)
@@ -159,10 +160,11 @@ class CategoryPage(QWidget):
         self.market_hint.setVisible(self.is_market)
         self.actions.buttons["to_market"].setVisible(not self.is_market)
         self.grid.blockSignals(True)  # під час перебудови виділення вказує на старі елементи
+        self.thumbs.reset()
         self.grid.clear()
         for template in self.workspace.list_templates(self.category_id):
-            icon = render_thumbnail(template, THUMB_SIZE, self.workspace, self.category_id)
-            item = QListWidgetItem(QIcon(icon), f"{template.name}\n{template.width} × {template.height}")
+            icon = self.thumbs.icon_for(template.id, template, self.category_id)
+            item = QListWidgetItem(icon, f"{template.name}\n{template.width} × {template.height}")
             item.setData(Qt.ItemDataRole.UserRole, template.id)
             self.grid.addItem(item)
             if template.id == select_id:

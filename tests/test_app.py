@@ -1,4 +1,5 @@
 """Тести інтерфейсу. Діалоги підмінено: відповіді задаються заздалегідь."""
+import os
 from pathlib import Path
 
 import pytest
@@ -242,3 +243,41 @@ def test_thumbnail_renders_all_element_types(qtbot, workspace, full_template):
     image = pixmap.toImage()
     # центр не фон-заглушка: щось намальовано
     assert image.pixelColor(90, 90) != Qt.GlobalColor.transparent
+
+
+def test_thumbnail_cache(qtbot, workspace, monkeypatch):
+    import cardgen.ui.thumbnails as thumbs
+    category = workspace.create_category("Кабель")
+    template = workspace.create_template(category.id, "Обкладинка")
+    calls = []
+    real = thumbs.render_thumbnail
+    monkeypatch.setattr(thumbs, "render_thumbnail", lambda *a: calls.append(1) or real(*a))
+
+    assert thumbs.cached_thumbnail(template, 64, workspace, category.id) is None
+    thumbs.thumbnail(template, 64, workspace, category.id)
+    thumbs.thumbnail(template, 64, workspace, category.id)
+    assert len(calls) == 1  # вдруге — з пам'яті
+    thumbs._memory.clear()
+    assert thumbs.cached_thumbnail(template, 64, workspace, category.id) is not None  # з диска
+
+    template.background.color = "#000000"
+    workspace.save_template(category.id, template)
+    os.utime(workspace.template_dir(category.id, template.id) / "template.json", ns=(1, 1))  # інший відбиток
+    assert thumbs.cached_thumbnail(template, 64, workspace, category.id) is None  # шаблон змінився
+    thumbs.thumbnail(template, 64, workspace, category.id)
+    assert len(calls) == 2
+    assert len(list((workspace.root / "cache" / "thumbs").glob(f"{template.id}-64-*.png"))) == 1
+
+
+def test_pages_open_without_waiting_for_thumbnails(qtbot, workspace):
+    window = MainWindow(workspace)
+    qtbot.addWidget(window)
+    category = workspace.create_category("Кабель")
+    for name in ("А", "Б", "В"):
+        workspace.create_template(category.id, name)
+    window.show_category(category.id)
+    page = window.category_page
+    assert page.grid.count() == 3 and page.thumbs.busy()  # сторінка є, мініатюри ще малюються
+    qtbot.waitUntil(lambda: not page.thumbs.busy(), timeout=10000)
+    window.category_page.refresh()
+    assert not page.thumbs.busy()  # повторно — усе з кешу
