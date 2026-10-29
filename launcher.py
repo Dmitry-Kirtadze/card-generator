@@ -2,7 +2,7 @@
 
 .exe містить Python, бібліотеки й початкову копію коду (папка app/ всередині збірки).
 Під час запуску обирає, звідки взяти код програми:
-- копія git-репозиторію в %LOCALAPPDATA%/CardGen/app — її оновлює кнопка «Оновлення…»;
+- %LOCALAPPDATA%/CardGen/app — код, завантажений з GitHub під час оновлення (з файлом .commit);
 - вбудована копія — якщо оновленої ще немає, вона потребує новіших бібліотек (RUNTIME)
   або не запускається.
 """
@@ -37,7 +37,7 @@ def bundled_code() -> Path:
 def candidates() -> list[Path]:
     bundled = bundled_code()
     updated = user_dir() / "app"
-    ok = (updated / ".git").exists() and 0 < runtime_of(updated) <= runtime_of(bundled)
+    ok = (updated / ".commit").exists() and 0 < runtime_of(updated) <= runtime_of(bundled)
     return [updated, bundled] if ok else [bundled]
 
 

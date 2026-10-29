@@ -1,17 +1,16 @@
-"""Збірка CardGen.exe (PyInstaller) і встановлення на цей комп'ютер.
+"""Збірка CardGen.exe (PyInstaller), установника (Inno Setup) і встановлення.
 
-    .venv\\Scripts\\python tools\\build_exe.py            — зібрати в dist\\CardGen
-    .venv\\Scripts\\python tools\\build_exe.py --install  — зібрати й встановити в
-        %LOCALAPPDATA%\\Programs\\CardGen, ярлики на Робочому столі й у меню «Пуск»
+    .venv\\Scripts\\python tools\\build_exe.py            — програма в dist\\CardGen і установник
+        dist\\Встановити Генератор карток <версія>.exe — його можна надіслати іншій людині
+    .venv\\Scripts\\python tools\\build_exe.py --install  — те саме й встановити на цей комп'ютер
 
 У збірці: Python, бібліотеки (PySide6, Pillow, openpyxl) і копія коду в папці app/
-(див. launcher.py). Код оновлюється через git без перезбирання; нова збірка потрібна,
+(див. launcher.py). Код оновлюється з GitHub без перезбирання; нова збірка потрібна,
 лише коли збільшено cardgen.RUNTIME (нові бібліотеки).
 """
 from __future__ import annotations
 
 import argparse
-import base64
 import os
 import shutil
 import subprocess
@@ -46,6 +45,9 @@ def copy_code(target: Path) -> list[str]:
     for name in files:
         (target / name).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / name, target / name)
+    # Номер коміту вбудованого коду: з ним оновлювач порівнює останню версію на GitHub.
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=True)
+    (target / ".commit").write_text(head.stdout.strip() + "\n", encoding="utf-8")
     return [f[:-3].replace("/", ".").removesuffix(".__init__") for f in files
             if f.startswith("cardgen/") and f.endswith(".py")]
 
@@ -100,42 +102,95 @@ def build() -> Path:
     return DIST / NAME
 
 
-def install_dir() -> Path:
-    return Path(os.environ["LOCALAPPDATA"]) / "Programs" / NAME
+ISS = """; Згенеровано tools/build_exe.py
+[Setup]
+AppId={{{{48EC309C-C11B-4838-8FF4-0E8B696904A8}}
+AppName={title}
+AppVersion={version}
+AppVerName={title} {version}
+AppPublisher=robostore.com.ua
+DefaultDirName={{localappdata}}\\Programs\\{name}
+DisableDirPage=yes
+DisableProgramGroupPage=yes
+PrivilegesRequired=lowest
+OutputDir={dist}
+OutputBaseFilename={setup_name}
+SetupIconFile={icon}
+UninstallDisplayIcon={{app}}\\{name}.exe
+UninstallDisplayName={title}
+Compression=lzma2/max
+SolidCompression=yes
+WizardStyle=modern
+CloseApplications=yes
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
+
+[Languages]
+Name: "uk"; MessagesFile: "compiler:Languages\\Ukrainian.isl"
+
+[Tasks]
+Name: "desktopicon"; Description: "{{cm:CreateDesktopIcon}}"; GroupDescription: "{{cm:AdditionalIcons}}"
+
+[InstallDelete]
+; бібліотеки попередньої збірки — щоб не лишились старі файли
+Type: filesandordirs; Name: "{{app}}\\_internal"
+
+[Files]
+Source: "{built}\\*"; DestDir: "{{app}}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[Icons]
+Name: "{{autoprograms}}\\{title}"; Filename: "{{app}}\\{name}.exe"
+Name: "{{autodesktop}}\\{title}"; Filename: "{{app}}\\{name}.exe"; Tasks: desktopicon
+
+[Run]
+Filename: "{{app}}\\{name}.exe"; Description: "{{cm:LaunchProgram,{title}}}"; Flags: nowait postinstall skipifsilent
+
+[UninstallDelete]
+; завантажений оновлений код і журнал; дані користувача (Документи) не чіпаємо
+Type: filesandordirs; Name: "{{localappdata}}\\{name}\\app"
+Type: files; Name: "{{localappdata}}\\{name}\\cardgen.log"
+"""
 
 
-def install(built: Path) -> Path:
-    target = install_dir()
-    if target.exists():
-        try:
-            shutil.rmtree(target)
-        except PermissionError:
-            sys.exit(f"Закрийте програму «{TITLE}» і повторіть встановлення ({target} зайнято).")
-    shutil.copytree(built, target)
-    exe = target / f"{NAME}.exe"
-    script = (
-        "$s = New-Object -ComObject WScript.Shell;"
-        "foreach ($dir in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) {"
-        # WScript.Shell не зберігає файл з кирилицею в назві — зберігаємо латиницею й перейменовуємо
-        f"  $tmp = Join-Path $dir '{NAME}.lnk'; $final = Join-Path $dir '{TITLE}.lnk';"
-        "  $l = $s.CreateShortcut($tmp);"
-        f"  $l.TargetPath = '{exe}'; $l.WorkingDirectory = '{target}'; $l.IconLocation = '{exe},0';"
-        "  $l.Save(); Move-Item -Force -LiteralPath $tmp -Destination $final }"
-    )
-    # -EncodedCommand (UTF-16), щоб кирилиця в команді дійшла без змін
-    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
-    subprocess.run(["powershell", "-NoProfile", "-EncodedCommand", encoded], check=True)
-    return exe
+def iscc() -> Path:
+    places = [Path(os.environ.get("LOCALAPPDATA", "")) / "Programs",
+              Path(os.environ.get("ProgramFiles(x86)", "")), Path(os.environ.get("ProgramFiles", ""))]
+    for place in places:
+        path = place / "Inno Setup 6" / "ISCC.exe"
+        if path.exists():
+            return path
+    sys.exit("Не знайдено Inno Setup 6. Встановіть: winget install JRSoftware.InnoSetup")
+
+
+def make_setup(built: Path) -> Path:
+    """Установник: один .exe, який можна надіслати іншій людині."""
+    sys.path.insert(0, str(ROOT))
+    from cardgen import __version__
+    setup_name = f"Встановити {TITLE} {__version__}"
+    script = BUILD / f"{NAME}.iss"
+    # Inno Setup читає кирилицю лише з UTF-8 з BOM
+    script.write_text(ISS.format(title=TITLE, version=__version__, name=NAME, dist=DIST, built=built,
+                                 icon=BUILD / "cardgen.ico", setup_name=setup_name), encoding="utf-8-sig")
+    subprocess.run([str(iscc()), "/Q", str(script)], check=True)
+    return DIST / f"{setup_name}.exe"
+
+
+def install(setup: Path) -> None:
+    """Тихо встановлює на цей комп'ютер через той самий установник."""
+    subprocess.run([str(setup), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/TASKS=desktopicon"], check=True)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--install", action="store_true", help="встановити після збірки")
+    parser.add_argument("--install", action="store_true", help="встановити на цей комп'ютер після збірки")
     args = parser.parse_args()
     built = build()
     print(f"Зібрано: {built}")
+    setup = make_setup(built)
+    print(f"Установник: {setup}")
     if args.install:
-        print(f"Встановлено: {install(built)}")
+        install(setup)
+        print(f"Встановлено: {Path(os.environ['LOCALAPPDATA']) / 'Programs' / NAME}")
 
 
 if __name__ == "__main__":

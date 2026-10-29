@@ -1,12 +1,15 @@
 """Оновлення програми з git: тимчасовий «сервер» (bare-репозиторій) і дві робочі копії."""
+import io
+import json
 import shutil
 import subprocess
+import zipfile
 from pathlib import Path
 
 import pytest
 
 from cardgen.ui.update_ui import UpdateDialog, changes_text
-from cardgen.updater import UpdateError, UpdateInfo, Updater, _run, read_runtime
+from cardgen.updater import ArchiveUpdater, UpdateError, UpdateInfo, Updater, _extract, _run, read_commit
 
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="немає git")
 
@@ -115,52 +118,114 @@ def test_server_unreachable(repos, tmp_path):
         Updater(app).check()
 
 
-# --- Зібрана програма: перше встановлення й версія бібліотек ------------------------
+# --- Зібрана програма: оновлення архівом з GitHub ------------------------------------
 
-def set_runtime(dev: Path, runtime: int) -> None:
-    (dev / "cardgen").mkdir(exist_ok=True)
-    commit(dev, "cardgen/__init__.py", f'__version__ = "x"\nRUNTIME = {runtime}\n', f"Бібліотеки {runtime}")
-    git(dev, "push", "-q", "origin", "main")
+class FakeGitHub:
+    """Відповіді GitHub API й архіви codeload для ArchiveUpdater."""
+
+    def __init__(self):
+        self.commits: list[tuple[str, str, int]] = []  # (sha, опис, RUNTIME)
+        self.offline = False
+
+    def push(self, message: str, runtime: int = 1) -> str:
+        sha = f"{len(self.commits) + 1:040x}"
+        self.commits.append((sha, message, runtime))
+        return sha
+
+    def archive(self, sha: str) -> bytes:
+        runtime = next(r for s, _, r in self.commits if s == sha)
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as zf:
+            zf.writestr(f"card-generator-{sha}/cardgen/__init__.py", f"RUNTIME = {runtime}\n")
+            zf.writestr(f"card-generator-{sha}/main.py", f"# {sha}\n")
+        return buffer.getvalue()
+
+    def __call__(self, url: str, timeout: int) -> bytes:
+        if self.offline:
+            raise UpdateError("Сервер оновлень не відповідає. Перевірте інтернет")
+        shas = [c[0] for c in self.commits]
+        if url.endswith("/commits/main"):
+            return json.dumps({"sha": shas[-1]}).encode()
+        if "/compare/" in url:
+            base, head = url.rsplit("/", 1)[1].split("...")
+            if base not in shas:
+                raise UpdateError("Сервер оновлень відповів помилкою 404")
+            new = self.commits[shas.index(base) + 1: shas.index(head) + 1]
+            return json.dumps({"ahead_by": len(new), "commits": [
+                {"commit": {"message": m + "\n\nдеталі"}} for _, m, _ in new]}).encode()  # від старих до нових
+        if "codeload.github.com" in url:
+            return self.archive(url.rsplit("/", 1)[1])
+        raise AssertionError(url)
 
 
-def test_first_install_clones(repos, tmp_path):
-    server, _, dev = repos
-    set_runtime(dev, 1)
+def bundled(tmp_path: Path, sha: str) -> Path:
+    code = tmp_path / "bundle" / "app"
+    (code / "cardgen").mkdir(parents=True)
+    (code / "cardgen" / "__init__.py").write_text("RUNTIME = 1\n", encoding="utf-8")
+    (code / ".commit").write_text(sha + "\n", encoding="utf-8")
+    return code
+
+
+def test_archive_update_cycle(tmp_path):
+    hub = FakeGitHub()
+    first = hub.push("Перша версія")
+    running = bundled(tmp_path, first)
     target = tmp_path / "user" / "app"
-    updater = Updater(target, python=None, repo_url=str(server), runtime=1)
+    updater = ArchiveUpdater(target, running, "me/card-generator", runtime=1, fetch=hub)
     assert updater.supported() == (True, "")
-    info = updater.check()
-    assert info.available and info.branch == "main"
-    updater.apply()
-    assert (target / ".git").exists() and read_runtime(target) == 1
     assert not updater.check().available
 
+    hub.push("Нова функція")
+    last = hub.push("Виправлення")
+    info = updater.check()
+    assert info.available and info.behind == 2
+    assert info.changes == ["Виправлення", "Нова функція"]
+    assert updater.apply() == ["Виправлення", "Нова функція"]
+    assert read_commit(target) == last and (target / "main.py").read_text(encoding="utf-8") == f"# {last}\n"
 
-def test_newer_runtime_needs_new_build(repos, tmp_path):
-    server, _, dev = repos
-    target = tmp_path / "app"
-    updater = Updater(target, python=None, repo_url=str(server), runtime=1)
+    # Після перезапуску працює вже завантажений код — оновлень немає.
+    assert not ArchiveUpdater(target, target, "me/card-generator", runtime=1, fetch=hub).check().available
+    assert not list(target.parent.glob("app.*"))  # тимчасові папки прибрано
+
+
+def test_archive_update_unknown_current(tmp_path):
+    hub = FakeGitHub()
+    hub.push("Остання")
+    running = bundled(tmp_path, "f" * 40)  # збірка з коміту, якого немає на сервері
+    updater = ArchiveUpdater(tmp_path / "app", running, "me/r", runtime=1, fetch=hub)
+    info = updater.check()
+    assert info.available and info.changes == ["Остання версія програми"]
     updater.apply()
-    set_runtime(dev, 2)
+    assert (tmp_path / "app" / ".commit").exists()
+
+
+def test_archive_newer_runtime_not_installed(tmp_path):
+    hub = FakeGitHub()
+    first = hub.push("v1")
+    target = tmp_path / "app"
+    ArchiveUpdater(target, bundled(tmp_path, "0" * 40), "me/r", runtime=1, fetch=hub).apply()
+    hub.push("Нові бібліотеки", runtime=2)
     with pytest.raises(UpdateError, match="нову збірку"):
-        updater.apply()
+        ArchiveUpdater(target, target, "me/r", runtime=1, fetch=hub).apply()
+    assert read_commit(target) == first  # робочий код не зачеплено
+    assert not list(tmp_path.glob("app.*"))
 
 
-def test_frozen_does_not_run_pip(repos, tmp_path):
-    server, _, dev = repos
-    target = tmp_path / "app"
-    calls = []
+def test_archive_offline(tmp_path):
+    hub = FakeGitHub()
+    hub.push("v1")
+    hub.offline = True
+    with pytest.raises(UpdateError, match="інтернет"):
+        ArchiveUpdater(tmp_path / "app", bundled(tmp_path, "0" * 40), "me/r", fetch=hub).check()
 
-    def runner(cmd, cwd, timeout):
-        calls.append(cmd[0])
-        return _run(cmd, cwd, timeout)
 
-    updater = Updater(target, runner=runner, python=None, repo_url=str(server))
-    updater.apply()
-    commit(dev, "requirements.txt", "PySide6\nopenpyxl\n", "Нова бібліотека")
-    git(dev, "push", "-q", "origin", "main")
-    updater.apply()
-    assert set(calls) == {"git"}
+def test_archive_rejects_bad_paths(tmp_path):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zf:
+        zf.writestr("repo-x/../../evil.txt", "x")
+    with pytest.raises(UpdateError):
+        _extract(buffer.getvalue(), tmp_path / "out")
+    assert not (tmp_path / "evil.txt").exists()
 
 
 def test_launcher_picks_code(tmp_path, monkeypatch):
@@ -172,8 +237,8 @@ def test_launcher_picks_code(tmp_path, monkeypatch):
         (code / "cardgen" / "__init__.py").write_text(f"RUNTIME = {runtime}\n", encoding="utf-8")
     monkeypatch.setattr(launcher, "bundled_code", lambda: bundled)
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
-    assert launcher.candidates() == [bundled]  # ще не копія git
-    (updated / ".git").mkdir()
+    assert launcher.candidates() == [bundled]  # ще нічого не завантажено
+    (updated / ".commit").write_text("x", encoding="utf-8")
     assert launcher.candidates() == [updated, bundled]
     (updated / "cardgen" / "__init__.py").write_text("RUNTIME = 3\n", encoding="utf-8")
     assert launcher.candidates() == [bundled]  # потрібні новіші бібліотеки

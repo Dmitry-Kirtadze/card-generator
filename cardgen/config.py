@@ -3,8 +3,8 @@
 Два способи запуску:
 - з робочої копії git (розробка): `python main.py`, усе поруч із main.py;
 - зібрана програма CardGen.exe (див. launcher.py): .exe містить Python і бібліотеки,
-  а код програми береться з копії git-репозиторію в user_dir()/app (оновлюється через git)
-  або, поки її немає, з копії, вкладеної в .exe.
+  а код програми береться з user_dir()/app (завантажується з GitHub під час оновлення)
+  або, поки його немає, з копії, вкладеної в .exe.
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 APP_ID = "CardGen"
-REPO_URL = "https://github.com/Dmitry-Kirtadze/card-generator.git"
+GITHUB_REPO = "Dmitry-Kirtadze/card-generator"  # публічний: оновлення без входу й без git
 WORKSPACE_FOLDER = "Генератор карток"
 
 
